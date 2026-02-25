@@ -41,11 +41,30 @@ make all
 
 ## Installation
 
+### Option 1: DKMS package (recommended)
+
+Download the latest `kwebdavfs-dkms_*.deb` from the [GitHub Releases](https://github.com/MrMEEE/kwebdavfs/releases) page, then install it:
+
 ```bash
-# Load the module
+sudo apt install ./kwebdavfs-dkms_*.deb
+```
+
+DKMS will automatically build and install the module for your running kernel, and rebuild it after every kernel upgrade.
+
+To load the module automatically at boot:
+
+```bash
+echo "kwebdavfs" | sudo tee /etc/modules-load.d/kwebdavfs.conf
+```
+
+### Option 2: Build and install manually
+
+```bash
+make clean
+make all
 sudo make install
 
-# Or manually:
+# Or load without installing:
 sudo insmod kwebdavfs.ko
 ```
 
