@@ -112,28 +112,51 @@ static ssize_t kwebdavfs_file_write_iter(struct kiocb *iocb, struct iov_iter *it
     struct webdav_response response;
     char *buffer;
     size_t count = iov_iter_count(iter);
+    loff_t offset = iocb->ki_pos;
+    size_t new_size;
     int ret;
 
     if (!ei->url)
         return -ENOENT;
 
-    /* Allocate buffer for the write data */
-    buffer = kmalloc(count, GFP_KERNEL);
-    if (!buffer)
-        return -ENOMEM;
+    mutex_lock(&ei->inode_mutex);
 
-    /* Copy data from iov_iter to buffer */
-    if (copy_from_iter(buffer, count, iter) != count) {
+    /* Final file size after this write */
+    new_size = (size_t)max_t(loff_t, i_size_read(inode), (loff_t)(offset + count));
+
+    /* Allocate merged buffer, zero-initialised (handles gaps and extensions) */
+    buffer = kzalloc(new_size, GFP_KERNEL);
+    if (!buffer) {
+        mutex_unlock(&ei->inode_mutex);
+        return -ENOMEM;
+    }
+
+    /* Pre-populate with existing content when doing a partial/append write */
+    if (offset > 0 || count < (size_t)i_size_read(inode)) {
+        struct webdav_response get_resp;
+        memset(&get_resp, 0, sizeof(get_resp));
+        ret = kwebdavfs_http_request(fsi, WEBDAV_GET, ei->url, NULL, 0, &get_resp);
+        if (ret == 0 && get_resp.data && get_resp.data_len > 0)
+            memcpy(buffer, get_resp.data,
+                   min_t(size_t, get_resp.data_len, new_size));
+        kwebdavfs_free_response(&get_resp);
+        if (ret < 0) {
+            kfree(buffer);
+            mutex_unlock(&ei->inode_mutex);
+            return ret;
+        }
+    }
+
+    /* Copy new data into buffer at the write offset */
+    if (copy_from_iter(buffer + offset, count, iter) != count) {
         kfree(buffer);
+        mutex_unlock(&ei->inode_mutex);
         return -EFAULT;
     }
 
-    mutex_lock(&ei->inode_mutex);
-
-    /* Send PUT request with data */
+    /* PUT the complete merged file */
     memset(&response, 0, sizeof(response));
-    ret = kwebdavfs_http_request(fsi, WEBDAV_PUT, ei->url, buffer, count, &response);
-
+    ret = kwebdavfs_http_request(fsi, WEBDAV_PUT, ei->url, buffer, new_size, &response);
     kfree(buffer);
 
     if (ret < 0) {
@@ -141,19 +164,20 @@ static ssize_t kwebdavfs_file_write_iter(struct kiocb *iocb, struct iov_iter *it
         goto out_unlock;
     }
 
-    if (response.status_code != 200 && response.status_code != 201) {
-        printk(KERN_ERR "kwebdavfs: server returned %d for PUT %s\n", 
+    if (response.status_code != 200 && response.status_code != 201 &&
+        response.status_code != 204) {
+        printk(KERN_ERR "kwebdavfs: server returned %d for PUT %s\n",
                response.status_code, ei->url);
         ret = -EIO;
         goto out_free_response;
     }
 
-    /* Update file size and mtime */
-    i_size_write(inode, count);
+    /* Update inode metadata */
+    i_size_write(inode, new_size);
+    iocb->ki_pos = offset + count;
     inode_set_mtime_to_ts(inode, current_time(inode));
     mark_inode_dirty(inode);
 
-    /* Update ETag if server provided one */
     if (response.etag) {
         kfree(ei->etag);
         ei->etag = kstrdup(response.etag, GFP_KERNEL);

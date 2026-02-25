@@ -24,6 +24,7 @@ struct http_request {
     char *body;
     size_t body_len;
     char *auth_header;
+    char *extra_headers;  /* optional additional headers, each "Key: Value\r\n" */
 };
 
 static char *webdav_method_names[] = {
@@ -207,6 +208,7 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
     /* Allocate a buffer large enough for all headers + body */
     buf_size = strlen(req->method) + strlen(req->path) + strlen(req->host)
                + (req->auth_header ? strlen(req->auth_header) : 0)
+               + (req->extra_headers ? strlen(req->extra_headers) : 0)
                + req->body_len + 512;
 
     full_request = kmalloc(buf_size, GFP_KERNEL);
@@ -229,6 +231,11 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
     if (req->auth_header)
         hdr_len += snprintf(full_request + hdr_len, buf_size - hdr_len,
                             "%s", req->auth_header);
+
+    /* Extra headers (e.g. Destination for MOVE) */
+    if (req->extra_headers)
+        hdr_len += snprintf(full_request + hdr_len, buf_size - hdr_len,
+                            "%s", req->extra_headers);
 
     /* PROPFIND-specific headers */
     if (is_propfind)
@@ -528,6 +535,92 @@ cleanup_auth:
     if (tls) tls13_free(tls);
 cleanup_sock:
     sock_release(sock);
+cleanup_url:
+    kfree(host);
+    kfree(path);
+    return ret;
+}
+
+/**
+ * kwebdavfs_http_move - send a WebDAV MOVE request.
+ *
+ * @overwrite: if true, send "Overwrite: T" (replace existing destination).
+ * Returns 0 on success, negative errno on failure.
+ */
+int kwebdavfs_http_move(struct kwebdavfs_fs_info *fsi, const char *src_url,
+                        const char *dst_url, bool overwrite)
+{
+    struct socket     *sock = NULL;
+    struct tls13_ctx  *tls  = NULL;
+    struct sockaddr_in addr;
+    struct http_request req;
+    struct webdav_response response;
+    char *host, *path, *extra;
+    int  port, ret;
+    bool use_ssl;
+
+    memset(&req, 0, sizeof(req));
+    memset(&response, 0, sizeof(response));
+
+    ret = parse_url(src_url, &host, &path, &port, &use_ssl);
+    if (ret < 0)
+        return ret;
+
+    extra = kasprintf(GFP_KERNEL, "Destination: %s\r\nOverwrite: %s\r\n",
+                      dst_url, overwrite ? "T" : "F");
+    if (!extra) { ret = -ENOMEM; goto cleanup_url; }
+
+    ret = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
+    if (ret < 0) goto cleanup_extra;
+
+    sock->sk->sk_rcvtimeo = msecs_to_jiffies(30000);
+    sock->sk->sk_sndtimeo = msecs_to_jiffies(30000);
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    ret = resolve_hostname(host, &addr);
+    if (ret < 0) goto cleanup_sock;
+
+    do {
+        ret = kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
+    } while ((ret == -ERESTARTSYS || ret == -EINTR) && !fatal_signal_pending(current));
+    if (ret < 0) goto cleanup_sock;
+
+    if (use_ssl) {
+        ret = upgrade_to_tls(sock, host, &tls);
+        if (ret < 0) goto cleanup_sock;
+    }
+
+    req.method        = "MOVE";
+    req.url           = (char *)src_url;
+    req.host          = host;
+    req.path          = path;
+    req.extra_headers = extra;
+    if (fsi->username && fsi->password)
+        req.auth_header = build_auth_header(fsi->username, fsi->password);
+
+    ret = send_http_request(sock, tls, &req);
+    if (ret < 0) goto cleanup_auth;
+
+    ret = receive_http_response(sock, tls, &response);
+    if (ret < 0) goto cleanup_auth;
+
+    /* 201 Created or 204 No Content = success */
+    if (response.status_code != 201 && response.status_code != 204) {
+        printk(KERN_ERR "kwebdavfs: MOVE %s -> %s returned %d\n",
+               src_url, dst_url, response.status_code);
+        ret = (response.status_code == 412) ? -EEXIST : -EIO;
+    }
+
+cleanup_auth:
+    kfree(req.auth_header);
+    kwebdavfs_free_response(&response);
+    if (tls) tls13_free(tls);
+cleanup_sock:
+    sock_release(sock);
+cleanup_extra:
+    kfree(extra);
 cleanup_url:
     kfree(host);
     kfree(path);

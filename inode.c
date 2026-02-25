@@ -135,37 +135,71 @@ int kwebdavfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
     struct kwebdavfs_inode_info *ei = KWEBDAVFS_I(inode);
     int ret;
 
-    /* Check if we're trying to set unsupported attributes */
-    if (iattr->ia_valid & (ATTR_UID | ATTR_GID | ATTR_MODE)) {
-        /* WebDAV doesn't support changing ownership or permissions */
+    /* UID/GID changes are not supported */
+    if (iattr->ia_valid & (ATTR_UID | ATTR_GID))
         return -EPERM;
-    }
 
     ret = setattr_prepare(idmap, dentry, iattr);
     if (ret)
         return ret;
 
-    /* Handle size changes (truncation) */
+    /* Handle size changes (truncation / extension) */
     if (iattr->ia_valid & ATTR_SIZE) {
         loff_t newsize = iattr->ia_size;
-        
+        loff_t cursize = i_size_read(inode);
+        struct kwebdavfs_fs_info *fsi = KWEBDAVFS_SB(inode->i_sb);
+
         mutex_lock(&ei->inode_mutex);
-        
-        if (newsize != i_size_read(inode)) {
-            /* For now, we don't support partial truncation.
-             * WebDAV would require reading the file, truncating it,
-             * and writing it back. */
-            if (newsize != 0) {
-                mutex_unlock(&ei->inode_mutex);
-                return -EOPNOTSUPP;
+
+        if (newsize != cursize) {
+            struct webdav_response resp;
+
+            if (newsize == 0) {
+                /* Truncate to zero: PUT with empty body */
+                memset(&resp, 0, sizeof(resp));
+                ret = kwebdavfs_http_request(fsi, WEBDAV_PUT, ei->url,
+                                             "", 0, &resp);
+                if (!ret && resp.status_code != 200 &&
+                    resp.status_code != 201 && resp.status_code != 204)
+                    ret = -EIO;
+                kwebdavfs_free_response(&resp);
+            } else {
+                /* Resize: GET existing content, resize buffer, PUT back */
+                struct webdav_response get_resp;
+                char *buf;
+                memset(&get_resp, 0, sizeof(get_resp));
+                ret = kwebdavfs_http_request(fsi, WEBDAV_GET, ei->url,
+                                             NULL, 0, &get_resp);
+                if (!ret) {
+                    buf = kzalloc(newsize, GFP_KERNEL);
+                    if (!buf) {
+                        ret = -ENOMEM;
+                    } else {
+                        if (get_resp.data && get_resp.data_len > 0)
+                            memcpy(buf, get_resp.data,
+                                   min_t(size_t, get_resp.data_len, newsize));
+                        memset(&resp, 0, sizeof(resp));
+                        ret = kwebdavfs_http_request(fsi, WEBDAV_PUT,
+                                                     ei->url, buf, newsize, &resp);
+                        if (!ret && resp.status_code != 200 &&
+                            resp.status_code != 201 && resp.status_code != 204)
+                            ret = -EIO;
+                        kwebdavfs_free_response(&resp);
+                        kfree(buf);
+                    }
+                }
+                kwebdavfs_free_response(&get_resp);
             }
-            
-            /* Truncate to zero - we can handle this by sending empty PUT */
-            truncate_setsize(inode, newsize);
-            ei->remote_size = newsize;
+
+            if (!ret) {
+                truncate_setsize(inode, newsize);
+                ei->remote_size = newsize;
+            }
         }
-        
+
         mutex_unlock(&ei->inode_mutex);
+        if (ret)
+            return ret;
     }
 
     /* Apply the changes to the inode */

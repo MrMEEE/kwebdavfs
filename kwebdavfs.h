@@ -123,6 +123,8 @@ void kwebdavfs_http_exit(void);
 int kwebdavfs_http_request(struct kwebdavfs_fs_info *fsi, enum webdav_method method,
                           const char *url, const char *body, size_t body_len,
                           struct webdav_response *response);
+int kwebdavfs_http_move(struct kwebdavfs_fs_info *fsi, const char *src_url,
+                        const char *dst_url, bool overwrite);
 int kwebdavfs_propfind(struct kwebdavfs_fs_info *fsi, const char *url,
                       struct list_head *entries);
 void kwebdavfs_free_dirents(struct list_head *entries);

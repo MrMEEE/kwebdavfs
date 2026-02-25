@@ -244,12 +244,11 @@ out_free_response:
     kwebdavfs_free_response(&response);
 out_free_url:
     mutex_unlock(&dir_ei->inode_mutex);
-    if (ret < 0)
-        kfree(file_url);
+    kfree(file_url);  /* inode has its own kstrdup'd copy */
     return ret;
 }
 
-static int kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+static struct dentry *kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
                           struct dentry *dentry, umode_t mode)
 {
     struct kwebdavfs_inode_info *dir_ei = KWEBDAVFS_I(dir);
@@ -261,18 +260,18 @@ static int kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
     int ret;
 
     if (!dir_ei->url)
-        return -ENOENT;
+        return ERR_PTR(-ENOENT);
 
     /* Build path for new directory */
     dir_path = kasprintf(GFP_KERNEL, "%s/%s/", 
                         dir_ei->url + strlen(fsi->server_url), name);
     if (!dir_path)
-        return -ENOMEM;
+        return ERR_PTR(-ENOMEM);
 
     dir_url = kwebdavfs_build_url(fsi, dir_path);
     kfree(dir_path);
     if (!dir_url)
-        return -ENOMEM;
+        return ERR_PTR(-ENOMEM);
 
     mutex_lock(&dir_ei->inode_mutex);
 
@@ -315,9 +314,8 @@ out_free_response:
     kwebdavfs_free_response(&response);
 out_free_url:
     mutex_unlock(&dir_ei->inode_mutex);
-    if (ret < 0)
-        kfree(dir_url);
-    return ret;
+    kfree(dir_url);  /* inode has its own kstrdup'd copy */
+    return ERR_PTR(ret);
 }
 
 static int kwebdavfs_unlink(struct inode *dir, struct dentry *dentry)
@@ -367,6 +365,81 @@ out_unlock:
     return ret;
 }
 
+static int kwebdavfs_rename(struct mnt_idmap *idmap,
+                            struct inode *old_dir, struct dentry *old_dentry,
+                            struct inode *new_dir, struct dentry *new_dentry,
+                            unsigned int flags)
+{
+    struct inode *src_inode = d_inode(old_dentry);
+    struct kwebdavfs_inode_info *src_ei     = KWEBDAVFS_I(src_inode);
+    struct kwebdavfs_inode_info *old_dir_ei = KWEBDAVFS_I(old_dir);
+    struct kwebdavfs_inode_info *new_dir_ei = KWEBDAVFS_I(new_dir);
+    struct kwebdavfs_fs_info *fsi = KWEBDAVFS_SB(old_dir->i_sb);
+    const char *new_name = new_dentry->d_name.name;
+    bool is_dir = S_ISDIR(src_inode->i_mode);
+    char *dst_path, *dst_url;
+    int ret;
+
+    /* Only support simple rename/move; no RENAME_EXCHANGE or RENAME_WHITEOUT */
+    if (flags & ~RENAME_NOREPLACE)
+        return -EINVAL;
+
+    if (!src_ei->url || !new_dir_ei->url)
+        return -ENOENT;
+
+    /* Build destination URL using the same pattern as create/mkdir */
+    if (is_dir)
+        dst_path = kasprintf(GFP_KERNEL, "%s/%s/",
+                             new_dir_ei->url + strlen(fsi->server_url), new_name);
+    else
+        dst_path = kasprintf(GFP_KERNEL, "%s/%s",
+                             new_dir_ei->url + strlen(fsi->server_url), new_name);
+    if (!dst_path)
+        return -ENOMEM;
+
+    dst_url = kwebdavfs_build_url(fsi, dst_path);
+    kfree(dst_path);
+    if (!dst_url)
+        return -ENOMEM;
+
+    /* Send MOVE to server; overwrite=true unless RENAME_NOREPLACE */
+    ret = kwebdavfs_http_move(fsi, src_ei->url, dst_url,
+                              !(flags & RENAME_NOREPLACE));
+    if (ret < 0) {
+        kfree(dst_url);
+        return ret;
+    }
+
+    /* Update the moved inode's URL */
+    kfree(src_ei->url);
+    src_ei->url = dst_url;  /* ownership transferred */
+
+    /* Invalidate both parent directory caches */
+    mutex_lock(&old_dir_ei->inode_mutex);
+    kwebdavfs_free_dirents(&old_dir_ei->dir_cache);
+    mutex_unlock(&old_dir_ei->inode_mutex);
+
+    if (new_dir != old_dir) {
+        mutex_lock(&new_dir_ei->inode_mutex);
+        kwebdavfs_free_dirents(&new_dir_ei->dir_cache);
+        mutex_unlock(&new_dir_ei->inode_mutex);
+    }
+
+    /* Update link counts and timestamps */
+    if (is_dir) {
+        drop_nlink(old_dir);
+        inc_nlink(new_dir);
+    }
+    inode_set_mtime_to_ts(old_dir, current_time(old_dir));
+    mark_inode_dirty(old_dir);
+    if (new_dir != old_dir) {
+        inode_set_mtime_to_ts(new_dir, current_time(new_dir));
+        mark_inode_dirty(new_dir);
+    }
+
+    return 0;
+}
+
 const struct file_operations kwebdavfs_dir_operations = {
     .owner          = THIS_MODULE,
     .iterate_shared = kwebdavfs_readdir,
@@ -376,6 +449,8 @@ const struct file_operations kwebdavfs_dir_operations = {
 const struct inode_operations kwebdavfs_dir_inode_operations = {
     .lookup         = kwebdavfs_lookup,
     .create         = kwebdavfs_create,
+    .mkdir          = kwebdavfs_mkdir,
+    .rename         = kwebdavfs_rename,
     .unlink         = kwebdavfs_unlink,
     .rmdir          = kwebdavfs_unlink,  /* Same as unlink for WebDAV */
     .getattr        = kwebdavfs_getattr,
