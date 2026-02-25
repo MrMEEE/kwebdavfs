@@ -28,10 +28,15 @@
 #endif
 #include <crypto/hash.h>
 #include <crypto/aead.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
-#include <linux/unaligned.h>
+/* linux/unaligned.h added ~6.12; older kernels use asm/unaligned.h */
+#ifdef __has_include
+#  if __has_include(<linux/unaligned.h>)
+#    include <linux/unaligned.h>
+#  else
+#    include <asm/unaligned.h>
+#  endif
 #else
-#include <asm/unaligned.h>
+#  include <asm/unaligned.h>
 #endif
 
 #include "tls.h"
@@ -565,7 +570,7 @@ free_tfm:
 /* ------------------------------------------------------------------ */
 
 /* Send a raw (plaintext) TLS record */
-static int send_plain_record(struct socket *sock, u8 ctype,
+static __maybe_unused int send_plain_record(struct socket *sock, u8 ctype,
                               const u8 *data, size_t dlen)
 {
     u8 hdr[5] = { ctype, 0x03, 0x01,

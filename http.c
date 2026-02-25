@@ -664,27 +664,6 @@ int kwebdavfs_propfind(struct kwebdavfs_fs_info *fsi, const char *url,
     return ret;
 }
 
-/* Find next occurrence of a tag with any namespace prefix, e.g. ":response>" */
-static const char *find_tag(const char *haystack, const char *local_name, bool closing)
-{
-    char needle[64];
-    if (closing)
-        snprintf(needle, sizeof(needle), "</%s>", local_name); /* no ns */
-    else
-        snprintf(needle, sizeof(needle), ":%s>", local_name);  /* :name> matches any prefix */
-
-    /* For closing tags we also look for </ns:name> */
-    const char *found = strstr(haystack, needle);
-    if (!found && closing) {
-        /* try without namespace */
-        snprintf(needle, sizeof(needle), "</%s>", local_name);
-        found = strstr(haystack, needle);
-    }
-    /* For closing, caller passes "</ns:" as prefix — just search for
-     * </something:local_name> or </local_name> via suffix match */
-    return found;
-}
-
 /* Find close-tag that ends with :local_name> e.g. </d:response> */
 static const char *find_close_tag(const char *p, const char *local_name)
 {
