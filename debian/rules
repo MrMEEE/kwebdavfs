@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+include /usr/share/dpkg/pkg-info.mk
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Nothing to compile — DKMS builds the module on install
+
+override_dh_auto_test:
+	# No test suite for a kernel module
+
+override_dh_auto_install:
+	install -d debian/kwebdavfs-dkms/usr/src/kwebdavfs-$(DEB_VERSION_UPSTREAM)/
+	cp *.c *.h Makefile dkms.conf VERSION \
+		debian/kwebdavfs-dkms/usr/src/kwebdavfs-$(DEB_VERSION_UPSTREAM)/
+	# Stamp the dkms.conf with the exact package version
+	sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="$(DEB_VERSION_UPSTREAM)"/' \
+		debian/kwebdavfs-dkms/usr/src/kwebdavfs-$(DEB_VERSION_UPSTREAM)/dkms.conf

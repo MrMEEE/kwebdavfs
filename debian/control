@@ -1,0 +1,21 @@
+Source: kwebdavfs
+Section: kernel
+Priority: optional
+Maintainer: MrMEEE <noreply@github.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Homepage: https://github.com/MrMEEE/kwebdavfs
+Rules-Requires-Root: no
+
+Package: kwebdavfs-dkms
+Architecture: all
+Depends: dkms, build-essential, linux-headers-generic | linux-headers-amd64 | linux-headers-arm64
+Description: kwebdavfs - WebDAV kernel filesystem (DKMS)
+ A native kernel filesystem module that mounts WebDAV/Nextcloud shares
+ directly via the Linux VFS layer, with no userspace helper required.
+ .
+ Features: directory listing cache with configurable TTL, read/write
+ file access, mkdir, rename (MOVE), delete, and percent-encoded filenames.
+ .
+ This package uses DKMS to automatically build and install the module
+ for every installed kernel version.

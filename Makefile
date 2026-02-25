@@ -2,10 +2,10 @@ obj-m += kwebdavfs.o
 
 kwebdavfs-objs := main.o super.o inode.o dir.o file.o http.o tls.o
 
-# Kernel build directory
-KDIR        := /lib/modules/$(shell uname -r)/build
-KVER        := $(shell uname -r)
-MODULES_DIR := /lib/modules/$(KVER)/extra
+# Kernel build directory — can be overridden by DKMS via dkms.conf MAKE[0]
+KVER        ?= $(shell uname -r)
+KDIR        ?= /lib/modules/$(KVER)/build
+MODULES_DIR ?= /lib/modules/$(KVER)/extra
 
 # CURDIR is set by make itself and survives sudo (unlike PWD)
 all:

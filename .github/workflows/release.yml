@@ -1,0 +1,76 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            debhelper \
+            devscripts \
+            build-essential \
+            dkms \
+            linux-headers-generic
+
+      - name: Set version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"          # e.g. v0.1.0
+          VERSION="${TAG#v}"               # strip leading 'v'
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "TAG=${TAG}"         >> "$GITHUB_OUTPUT"
+
+      - name: Sync debian/changelog version with tag
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          # Ensure the top entry matches the tag (release.sh keeps it in sync,
+          # but guard against manual tag pushes)
+          TOP=$(head -1 debian/changelog | grep -oP '\(\K[^)]+' | cut -d- -f1)
+          if [[ "$TOP" != "$VERSION" ]]; then
+            TIMESTAMP="$(date -R)"
+            TMP="$(mktemp)"
+            {
+              echo "kwebdavfs (${VERSION}) unstable; urgency=medium"
+              echo ""
+              echo "  * Release ${GITHUB_REF_NAME}."
+              echo ""
+              echo " -- MrMEEE <noreply@github.com>  ${TIMESTAMP}"
+              echo ""
+              cat debian/changelog
+            } > "$TMP"
+            mv "$TMP" debian/changelog
+          fi
+
+      - name: Build Debian package
+        run: |
+          chmod +x debian/rules debian/postinst debian/prerm
+          dpkg-buildpackage -us -uc -b
+          # dpkg-buildpackage places output in parent directory
+          ls -la ../kwebdavfs-dkms_*.deb
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          cp ../kwebdavfs-dkms_*.deb dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: kwebdavfs ${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          files: dist/*.deb

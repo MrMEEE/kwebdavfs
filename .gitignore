@@ -6,3 +6,10 @@
 *.symvers
 .*.cmd
 .module-common.o
+
+# Debian build artefacts (output to parent dir, but guard the staging tree)
+debian/kwebdavfs-dkms/
+debian/debhelper-build-stamp
+debian/.debhelper/
+debian/files
+debian/*.substvars

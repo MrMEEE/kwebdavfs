@@ -1,0 +1,25 @@
+#!/bin/bash
+set -e
+
+# Determine the version of this package
+VERSION=$(dpkg-query --showformat='${Version}' --show kwebdavfs-dkms 2>/dev/null \
+          | cut -d- -f1) || true
+
+case "$1" in
+    configure)
+        if [ -n "$VERSION" ]; then
+            dkms add    -m kwebdavfs -v "$VERSION" --force  2>/dev/null || true
+            dkms build  -m kwebdavfs -v "$VERSION"          2>/dev/null || true
+            dkms install -m kwebdavfs -v "$VERSION" --force  2>/dev/null || true
+        fi
+        # Auto-load the module now and on every boot
+        if ! grep -qx 'kwebdavfs' /etc/modules-load.d/kwebdavfs.conf 2>/dev/null; then
+            echo 'kwebdavfs' > /etc/modules-load.d/kwebdavfs.conf
+        fi
+        modprobe kwebdavfs 2>/dev/null || true
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+exit 0
