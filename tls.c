@@ -19,15 +19,94 @@
 #include <linux/in.h>
 #include <linux/sched/signal.h>
 #include <linux/scatterlist.h>
+#include <linux/version.h>
 #include <net/sock.h>
 #include <crypto/ecdh.h>
 #include <crypto/kpp.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
 #include <crypto/hkdf.h>
+#endif
 #include <crypto/hash.h>
 #include <crypto/aead.h>
 #include <linux/unaligned.h>
 
 #include "tls.h"
+
+/* ------------------------------------------------------------------ */
+/*  HKDF compatibility shim (crypto/hkdf.h added in kernel 6.13)      */
+/* ------------------------------------------------------------------ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
+/*
+ * hkdf_extract - HKDF-Extract(salt, IKM) = HMAC-Hash(salt, IKM)
+ * Sets HMAC key to `salt`, then computes HMAC(IKM) -> prk.
+ */
+static int hkdf_extract(struct crypto_shash *hmac_tfm,
+                        const u8 *ikm, unsigned int ikmlen,
+                        const u8 *salt, unsigned int saltlen,
+                        u8 *prk)
+{
+    SHASH_DESC_ON_STACK(desc, hmac_tfm);
+    int ret;
+
+    ret = crypto_shash_setkey(hmac_tfm, salt, saltlen);
+    if (ret)
+        return ret;
+    desc->tfm = hmac_tfm;
+    ret = crypto_shash_digest(desc, ikm, ikmlen, prk);
+    shash_desc_zero(desc);
+    return ret;
+}
+
+/*
+ * hkdf_expand - HKDF-Expand(PRK, info, L)
+ * PRK is assumed to already be set as the HMAC key on hmac_tfm.
+ * Implements RFC 5869 §2.3.
+ */
+static int hkdf_expand(struct crypto_shash *hmac_tfm,
+                       const u8 *info, unsigned int infolen,
+                       u8 *okm, unsigned int okmlen)
+{
+    unsigned int digest_size = crypto_shash_digestsize(hmac_tfm);
+    SHASH_DESC_ON_STACK(desc, hmac_tfm);
+    u8 *tmp;
+    const u8 *prev = NULL;
+    unsigned int done = 0;
+    u8 ctr;
+    int ret = 0;
+
+    tmp = kmalloc(digest_size, GFP_KERNEL);
+    if (!tmp)
+        return -ENOMEM;
+
+    desc->tfm = hmac_tfm;
+    for (ctr = 1; done < okmlen; ctr++) {
+        unsigned int copy_len;
+
+        ret = crypto_shash_init(desc);
+        if (ret) goto done;
+        if (prev) {
+            ret = crypto_shash_update(desc, prev, digest_size);
+            if (ret) goto done;
+        }
+        if (infolen) {
+            ret = crypto_shash_update(desc, info, infolen);
+            if (ret) goto done;
+        }
+        ret = crypto_shash_finup(desc, &ctr, 1, tmp);
+        if (ret) goto done;
+
+        copy_len = min_t(unsigned int, digest_size, okmlen - done);
+        memcpy(okm + done, tmp, copy_len);
+        done += copy_len;
+        prev = tmp;
+    }
+done:
+    memzero_explicit(tmp, digest_size);
+    kfree(tmp);
+    shash_desc_zero(desc);
+    return ret;
+}
+#endif /* LINUX_VERSION_CODE < 6.13 */
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */

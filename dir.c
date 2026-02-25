@@ -4,6 +4,7 @@
 #include <linux/namei.h>
 #include <linux/fs.h>
 #include <linux/jiffies.h>
+#include <linux/version.h>
 
 #include "kwebdavfs.h"
 
@@ -254,8 +255,16 @@ out_free_url:
     return ret;
 }
 
+/* mkdir return type changed from int to struct dentry * in kernel 6.15 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
+#define MKDIR_ERR(e) ERR_PTR(e)
 static struct dentry *kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
                           struct dentry *dentry, umode_t mode)
+#else
+#define MKDIR_ERR(e) (e)
+static int kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+                           struct dentry *dentry, umode_t mode)
+#endif
 {
     struct kwebdavfs_inode_info *dir_ei = KWEBDAVFS_I(dir);
     struct kwebdavfs_fs_info *fsi = KWEBDAVFS_SB(dir->i_sb);
@@ -266,24 +275,24 @@ static struct dentry *kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir
     int ret;
 
     if (!dir_ei->url)
-        return ERR_PTR(-ENOENT);
+        return MKDIR_ERR(-ENOENT);
 
     /* Build path for new directory, percent-encoding special chars in name */
     {
         char *enc = kwebdavfs_url_encode_segment(name);
         if (!enc)
-            return ERR_PTR(-ENOMEM);
+            return MKDIR_ERR(-ENOMEM);
         dir_path = kasprintf(GFP_KERNEL, "%s/%s/",
                             dir_ei->url + strlen(fsi->server_url), enc);
         kfree(enc);
     }
     if (!dir_path)
-        return ERR_PTR(-ENOMEM);
+        return MKDIR_ERR(-ENOMEM);
 
     dir_url = kwebdavfs_build_url(fsi, dir_path);
     kfree(dir_path);
     if (!dir_url)
-        return ERR_PTR(-ENOMEM);
+        return MKDIR_ERR(-ENOMEM);
 
     mutex_lock(&dir_ei->inode_mutex);
 
@@ -327,8 +336,13 @@ out_free_response:
 out_free_url:
     mutex_unlock(&dir_ei->inode_mutex);
     kfree(dir_url);  /* inode has its own kstrdup'd copy */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
     return ERR_PTR(ret);
+#else
+    return ret;
+#endif
 }
+#undef MKDIR_ERR
 
 static int kwebdavfs_unlink(struct inode *dir, struct dentry *dentry)
 {
