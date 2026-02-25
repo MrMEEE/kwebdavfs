@@ -131,6 +131,7 @@ void kwebdavfs_free_dirents(struct list_head *entries);
 void kwebdavfs_free_response(struct webdav_response *response);
 
 /* Utility functions */
+char *kwebdavfs_url_encode_segment(const char *name);
 char *kwebdavfs_build_url(struct kwebdavfs_fs_info *fsi, const char *path);
 /* Convert a PROPFIND href (absolute path like /dav/files/mjp/foo) to a full URL */
 char *kwebdavfs_href_to_url(struct kwebdavfs_fs_info *fsi, const char *href);

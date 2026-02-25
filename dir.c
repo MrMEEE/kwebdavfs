@@ -193,9 +193,15 @@ static int kwebdavfs_create(struct mnt_idmap *idmap, struct inode *dir,
     if (!dir_ei->url)
         return -ENOENT;
 
-    /* Build path for new file */
-    file_path = kasprintf(GFP_KERNEL, "%s/%s", 
-                         dir_ei->url + strlen(fsi->server_url), name);
+    /* Build path for new file, percent-encoding special chars in name */
+    {
+        char *enc = kwebdavfs_url_encode_segment(name);
+        if (!enc)
+            return -ENOMEM;
+        file_path = kasprintf(GFP_KERNEL, "%s/%s",
+                             dir_ei->url + strlen(fsi->server_url), enc);
+        kfree(enc);
+    }
     if (!file_path)
         return -ENOMEM;
 
@@ -262,9 +268,15 @@ static struct dentry *kwebdavfs_mkdir(struct mnt_idmap *idmap, struct inode *dir
     if (!dir_ei->url)
         return ERR_PTR(-ENOENT);
 
-    /* Build path for new directory */
-    dir_path = kasprintf(GFP_KERNEL, "%s/%s/", 
-                        dir_ei->url + strlen(fsi->server_url), name);
+    /* Build path for new directory, percent-encoding special chars in name */
+    {
+        char *enc = kwebdavfs_url_encode_segment(name);
+        if (!enc)
+            return ERR_PTR(-ENOMEM);
+        dir_path = kasprintf(GFP_KERNEL, "%s/%s/",
+                            dir_ei->url + strlen(fsi->server_url), enc);
+        kfree(enc);
+    }
     if (!dir_path)
         return ERR_PTR(-ENOMEM);
 
@@ -387,13 +399,19 @@ static int kwebdavfs_rename(struct mnt_idmap *idmap,
     if (!src_ei->url || !new_dir_ei->url)
         return -ENOENT;
 
-    /* Build destination URL using the same pattern as create/mkdir */
-    if (is_dir)
-        dst_path = kasprintf(GFP_KERNEL, "%s/%s/",
-                             new_dir_ei->url + strlen(fsi->server_url), new_name);
-    else
-        dst_path = kasprintf(GFP_KERNEL, "%s/%s",
-                             new_dir_ei->url + strlen(fsi->server_url), new_name);
+    /* Build destination URL, percent-encoding special chars in new_name */
+    {
+        char *enc = kwebdavfs_url_encode_segment(new_name);
+        if (!enc)
+            return -ENOMEM;
+        if (is_dir)
+            dst_path = kasprintf(GFP_KERNEL, "%s/%s/",
+                                 new_dir_ei->url + strlen(fsi->server_url), enc);
+        else
+            dst_path = kasprintf(GFP_KERNEL, "%s/%s",
+                                 new_dir_ei->url + strlen(fsi->server_url), enc);
+        kfree(enc);
+    }
     if (!dst_path)
         return -ENOMEM;
 

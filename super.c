@@ -230,6 +230,59 @@ struct inode *kwebdavfs_get_root_inode(struct super_block *sb)
     return inode;
 }
 
+/**
+ * kwebdavfs_url_encode_segment - percent-encode a single path segment name.
+ *
+ * Encodes all characters that are not unreserved (RFC 3986) or common
+ * sub-delimiters safe in path segments.  In particular, spaces become %20.
+ * Returns a kmalloc'd string the caller must kfree, or NULL on ENOMEM.
+ */
+char *kwebdavfs_url_encode_segment(const char *name)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    const unsigned char *s = (const unsigned char *)name;
+    char *out, *p;
+    size_t len = 0;
+
+    /* Calculate output length */
+    for (; *s; s++) {
+        unsigned char c = *s;
+        /* Unreserved chars (RFC 3986 §2.3) + path sub-delimiters safe to keep */
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~' ||
+            c == '!' || c == '$' || c == '&' || c == '\'' ||
+            c == '(' || c == ')' || c == '*' || c == '+' ||
+            c == ',' || c == ';' || c == '=' || c == '@')
+            len += 1;
+        else
+            len += 3; /* %XX */
+    }
+
+    out = kmalloc(len + 1, GFP_KERNEL);
+    if (!out)
+        return NULL;
+
+    p = out;
+    for (s = (const unsigned char *)name; *s; s++) {
+        unsigned char c = *s;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~' ||
+            c == '!' || c == '$' || c == '&' || c == '\'' ||
+            c == '(' || c == ')' || c == '*' || c == '+' ||
+            c == ',' || c == ';' || c == '=' || c == '@') {
+            *p++ = c;
+        } else {
+            *p++ = '%';
+            *p++ = hex[c >> 4];
+            *p++ = hex[c & 0xf];
+        }
+    }
+    *p = '\0';
+    return out;
+}
+
 char *kwebdavfs_build_url(struct kwebdavfs_fs_info *fsi, const char *path)
 {
     char *url;
