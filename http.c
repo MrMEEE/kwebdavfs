@@ -74,7 +74,7 @@ static int resolve_hostname(const char *hostname, struct sockaddr_in *addr)
         return -EINVAL;
     }
 
-    printk(KERN_DEBUG "kwebdavfs: resolved %s -> %s\n", hostname, ip_addr);
+    kwebdavfs_dbg("kwebdavfs: resolved %s -> %s\n", hostname, ip_addr);
     kfree(ip_addr);
     return 0;
 }
@@ -88,13 +88,13 @@ static int upgrade_to_tls(struct socket *sock, const char *host,
 
 int kwebdavfs_http_init(void)
 {
-    printk(KERN_INFO "kwebdavfs: HTTP client initialized (DNS: enabled, TLS: basic support)\n");
+    kwebdavfs_dbg("kwebdavfs: HTTP client initialized (DNS: enabled, TLS: basic support)\n");
     return 0;
 }
 
 void kwebdavfs_http_exit(void)
 {
-    printk(KERN_INFO "kwebdavfs: HTTP client cleaned up\n");
+    kwebdavfs_dbg("kwebdavfs: HTTP client cleaned up\n");
 }
 
 static const char b64_table[] =
@@ -425,7 +425,7 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
     /* RFC 7230: 1xx, 204, 304 must not include a message body */
     if (response->status_code < 200 || response->status_code == 204 ||
         response->status_code == 304) {
-        printk(KERN_INFO "kwebdavfs: response status=%d body=0 bytes\n",
+        kwebdavfs_dbg("kwebdavfs: response status=%d body=0 bytes\n",
                response->status_code);
         kfree(hdr_buf);
         return 0;
@@ -562,7 +562,7 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
         }
     }
 
-    printk(KERN_INFO "kwebdavfs: response status=%d body=%zu bytes\n",
+    kwebdavfs_dbg("kwebdavfs: response status=%d body=%zu bytes\n",
            response->status_code, response->data_len);
 
     kfree(hdr_buf);
@@ -650,7 +650,7 @@ int kwebdavfs_http_request(struct kwebdavfs_fs_info *fsi, enum webdav_method met
         goto cleanup_auth;
     }
 
-    printk(KERN_DEBUG "kwebdavfs: %s %s -> %d (%s)\n",
+    kwebdavfs_dbg("kwebdavfs: %s %s -> %d (%s)\n",
            req.method, url, response->status_code,
            use_ssl ? "TLS1.3" : "plain");
 
@@ -730,7 +730,7 @@ int kwebdavfs_http_move(struct kwebdavfs_fs_info *fsi, const char *src_url,
     ret = receive_http_response(sock, tls, &response);
     if (ret < 0) goto cleanup_auth;
 
-    printk(KERN_DEBUG "kwebdavfs: MOVE %s -> %d (%s)\n",
+    kwebdavfs_dbg("kwebdavfs: MOVE %s -> %d (%s)\n",
            src_url, response.status_code, use_ssl ? "TLS1.3" : "plain");
 
     /* 201 Created or 204 No Content = success */
@@ -992,7 +992,7 @@ int kwebdavfs_parse_xml_response(const char *xml, const char *request_url,
     const char *resp_content;
     int count = 0;
 
-    printk(KERN_INFO "kwebdavfs: parsing XML (%zu bytes): %.120s...\n",
+    kwebdavfs_dbg("kwebdavfs: parsing XML (%zu bytes): %.120s...\n",
            strlen(xml), xml);
 
     /* Iterate over <response> elements */
@@ -1071,7 +1071,7 @@ next_resp:
         p = resp_end ? resp_end + 1 : resp_content + 1;
     }
 
-    printk(KERN_INFO "kwebdavfs: parsed %d entries\n", count);
+    kwebdavfs_dbg("kwebdavfs: parsed %d entries\n", count);
     return 0;
 }
 

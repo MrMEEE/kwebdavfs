@@ -12,6 +12,10 @@ MODULE_DESCRIPTION("Kernel WebDAV Filesystem for NextCloud");
 MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0");
 
+bool kwebdavfs_debug = false;
+module_param(kwebdavfs_debug, bool, 0644);
+MODULE_PARM_DESC(kwebdavfs_debug, "Enable verbose debug logging (default: 0)");
+
 static struct kmem_cache *kwebdavfs_inode_cache;
 
 static struct inode *kwebdavfs_alloc_inode(struct super_block *sb)
@@ -123,7 +127,7 @@ static int kwebdavfs_fill_super(struct super_block *sb, void *data, int silent)
         }
         if (strncmp(fsi->server_url, "https://", 8) == 0)
             fsi->use_ssl = true;
-        printk(KERN_INFO "kwebdavfs: mounting %s (ssl=%s, timeout=%ds)\n",
+        kwebdavfs_dbg("kwebdavfs: mounting %s (ssl=%s, timeout=%ds)\n",
                fsi->server_url, fsi->use_ssl ? "yes" : "no", fsi->timeout);
     }
 
@@ -203,7 +207,8 @@ static int __init kwebdavfs_init(void)
 {
     int ret;
     
-    printk(KERN_INFO "kwebdavfs: Initializing kernel WebDAV filesystem\n");
+    printk(KERN_INFO "kwebdavfs: v" KWEBDAVFS_VERSION " loading (debug=%s)\n",
+           kwebdavfs_debug ? "on" : "off");
     
     // Create inode cache
     kwebdavfs_inode_cache = kmem_cache_create("kwebdavfs_inode_cache",
@@ -232,7 +237,7 @@ out_cache:
 
 static void __exit kwebdavfs_exit(void)
 {
-    printk(KERN_INFO "kwebdavfs: Unloading kernel WebDAV filesystem\n");
+    kwebdavfs_dbg("kwebdavfs: unloading\n");
     
     unregister_filesystem(&kwebdavfs_type);
     // Skip HTTP cleanup for now

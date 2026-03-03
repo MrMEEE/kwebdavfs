@@ -9,6 +9,11 @@
 #define KWEBDAVFS_MAGIC     0x57454244  /* "WEBD" */
 #define KWEBDAVFS_VERSION   "1.0"
 
+/* Set via module param: insmod kwebdavfs debug=1  or  modprobe kwebdavfs debug=1 */
+extern bool kwebdavfs_debug;
+#define kwebdavfs_dbg(fmt, ...) \
+    do { if (kwebdavfs_debug) printk(KERN_INFO fmt, ##__VA_ARGS__); } while (0)
+
 /* Forward declarations */
 struct kwebdavfs_fs_info;
 struct kwebdavfs_inode_info;

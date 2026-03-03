@@ -40,6 +40,7 @@
 #endif
 
 #include "tls.h"
+#include "kwebdavfs.h"
 
 /* ------------------------------------------------------------------ */
 /*  HKDF compatibility shim (crypto/hkdf.h added in kernel 6.13)      */
@@ -1128,7 +1129,7 @@ int tls13_connect(struct socket *sock, const char *hostname,
 
     ctx->handshake_done = true;
     *out = ctx;
-    printk(KERN_INFO "kwebdavfs/tls: TLS 1.3 handshake OK (AES-128-GCM-SHA256)\n");
+    kwebdavfs_dbg("kwebdavfs/tls: TLS 1.3 handshake OK (AES-128-GCM-SHA256)\n");
     return 0;
 
 err:
@@ -1197,7 +1198,7 @@ retry_recv:
     /* Skip NewSessionTicket and other handshake messages that arrive
      * after handshake completes (server sends with app keys) */
     if (inner_type == TLS_CONTENT_HANDSHAKE) {
-        printk(KERN_DEBUG "kwebdavfs/tls: skipping post-handshake hs record\n");
+        kwebdavfs_dbg("kwebdavfs/tls: skipping post-handshake hs record\n");
         kfree(payload);
         goto retry_recv;
     }
