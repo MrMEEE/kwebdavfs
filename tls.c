@@ -1140,12 +1140,28 @@ err:
 /* ------------------------------------------------------------------ */
 /*  Application data send / recv                                      */
 /* ------------------------------------------------------------------ */
+/* TLS 1.3 max plaintext per record = 2^14 bytes (RFC 8446 §5.1) */
+#define TLS_MAX_PLAINTEXT  16384
+
 int tls13_send(struct tls13_ctx *ctx, const void *data, size_t len)
 {
+    const u8 *p = data;
+    size_t    remaining = len;
+    int       ret;
+
     if (!ctx || !ctx->handshake_done) return -EINVAL;
-    return send_enc_record(ctx,
-                           ctx->c_app_key, ctx->c_app_iv, &ctx->c_app_seq,
-                           TLS_CONTENT_APPDATA, data, len);
+
+    /* Split into ≤ TLS_MAX_PLAINTEXT chunks so we never exceed the record limit */
+    while (remaining > 0) {
+        size_t chunk = min_t(size_t, remaining, TLS_MAX_PLAINTEXT);
+        ret = send_enc_record(ctx,
+                              ctx->c_app_key, ctx->c_app_iv, &ctx->c_app_seq,
+                              TLS_CONTENT_APPDATA, p, chunk);
+        if (ret) return ret;
+        p         += chunk;
+        remaining -= chunk;
+    }
+    return 0;
 }
 
 int tls13_recv(struct tls13_ctx *ctx, void *buf, size_t len, int flags)
