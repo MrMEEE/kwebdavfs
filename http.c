@@ -2,6 +2,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/string.h>
+#include <linux/version.h>
 #include <linux/time.h>
 #include <linux/inet.h>
 #include <linux/socket.h>
@@ -509,11 +510,15 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
                 char *tmp;
                 if (got >= KWEBDAV_MAX_BODY) break;
                 if (got + KWEBDAV_READ_CHUNK > alloc) {
-                    tmp = kvrealloc(body, alloc + KWEBDAV_READ_CHUNK + 1,
-                                    GFP_KERNEL);
+                    size_t new_alloc = alloc + KWEBDAV_READ_CHUNK;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
+                    tmp = kvrealloc(body, new_alloc + 1, GFP_KERNEL);
+#else
+                    tmp = kvrealloc(body, alloc + 1, new_alloc + 1, GFP_KERNEL);
+#endif
                     if (!tmp) break; /* keep what we have */
-                    body   = tmp;
-                    alloc += KWEBDAV_READ_CHUNK;
+                    body  = tmp;
+                    alloc = new_alloc;
                 }
                 memset(&msg, 0, sizeof(msg));
                 iov.iov_base = body + got;
