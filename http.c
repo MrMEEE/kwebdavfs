@@ -298,6 +298,57 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
 #define KWEBDAV_READ_CHUNK  65536                   /* 64 KB  — body chunks  */
 #define KWEBDAV_MAX_BODY   (256 * 1024 * 1024)      /* 256 MB — hard cap     */
 
+/*
+ * Decode HTTP/1.1 chunked transfer encoding in-place.
+ * Input:  buf[0..len) contains the raw chunked body (chunk-size CRLF data CRLF ...)
+ * Output: buf is overwritten with the decoded body; *out_len receives decoded length.
+ * Returns 0 on success, -EINVAL on malformed input (partial result still in buf).
+ */
+static int decode_chunked_inplace(char *buf, size_t len, size_t *out_len)
+{
+    char   *src = buf;
+    char   *dst = buf;
+    char   *end = buf + len;
+
+    while (src < end) {
+        /* Find end of chunk-size line */
+        char *crlf = memchr(src, '\r', end - src);
+        if (!crlf || crlf + 1 >= end || crlf[1] != '\n')
+            break; /* truncated */
+
+        /* Parse hex chunk size (ignore chunk extensions after ';') */
+        unsigned long chunk_size = 0;
+        char *p = src;
+        while (p < crlf) {
+            int nib;
+            if (*p >= '0' && *p <= '9')      nib = *p - '0';
+            else if (*p >= 'a' && *p <= 'f') nib = *p - 'a' + 10;
+            else if (*p >= 'A' && *p <= 'F') nib = *p - 'A' + 10;
+            else break; /* hit extension or invalid char */
+            chunk_size = (chunk_size << 4) | nib;
+            p++;
+        }
+        src = crlf + 2; /* skip size-line CRLF */
+
+        if (chunk_size == 0)
+            break; /* last chunk */
+
+        if (src + chunk_size > end)
+            chunk_size = end - src; /* truncated data — copy what we have */
+
+        memmove(dst, src, chunk_size);
+        dst += chunk_size;
+        src += chunk_size;
+
+        /* Skip trailing CRLF after chunk data */
+        if (src + 1 < end && src[0] == '\r' && src[1] == '\n')
+            src += 2;
+    }
+    *dst = '\0';
+    *out_len = dst - buf;
+    return 0;
+}
+
 static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
                                   struct webdav_response *response)
 {
@@ -434,6 +485,12 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
                 got += ret;
             }
             body[got] = '\0';
+            /* If server also set chunked encoding, decode it */
+            if (is_chunked) {
+                size_t decoded_len = 0;
+                decode_chunked_inplace(body, got, &decoded_len);
+                got = decoded_len;
+            }
             response->data     = body;
             response->data_len = got;
         } else if (is_chunked || content_length < 0) {
@@ -470,6 +527,12 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
                 got += ret;
             }
             body[got] = '\0';
+            /* Decode chunked transfer encoding if needed */
+            if (is_chunked) {
+                size_t decoded_len = 0;
+                decode_chunked_inplace(body, got, &decoded_len);
+                got = decoded_len;
+            }
             response->data     = body;
             response->data_len = got;
         }
