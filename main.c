@@ -79,7 +79,7 @@ static const struct super_operations kwebdavfs_sops = {
     .evict_inode    = kwebdavfs_evict_inode,
     .destroy_inode  = kwebdavfs_destroy_inode,
     .put_super      = kwebdavfs_put_super,
-    .statfs         = simple_statfs,
+    .statfs         = kwebdavfs_statfs,
 };
 
 struct kwebdavfs_mount_args {

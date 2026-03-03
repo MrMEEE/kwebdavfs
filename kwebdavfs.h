@@ -129,6 +129,11 @@ int kwebdavfs_propfind(struct kwebdavfs_fs_info *fsi, const char *url,
                       struct list_head *entries);
 void kwebdavfs_free_dirents(struct list_head *entries);
 void kwebdavfs_free_response(struct webdav_response *response);
+int kwebdavfs_get_quota(struct kwebdavfs_fs_info *fsi, const char *url,
+                        loff_t *available, loff_t *used);
+
+/* super.c */
+int kwebdavfs_statfs(struct dentry *dentry, struct kstatfs *buf);
 
 /* Utility functions */
 char *kwebdavfs_url_encode_segment(const char *name);

@@ -16,6 +16,13 @@
 
 #include "kwebdavfs.h"
 
+/* forward declarations — implementations follow kwebdavfs_get_quota */
+static int kwebdavfs_quota_request(struct kwebdavfs_fs_info *fsi, const char *url,
+                                    const char *body, size_t body_len,
+                                    struct webdav_response *response);
+static const char *find_element(const char *p, const char *local_name,
+                                const char **end_tag);
+
 /* Simple HTTP client implementation for kernel space */
 
 struct http_request {
@@ -27,6 +34,7 @@ struct http_request {
     size_t body_len;
     char *auth_header;
     char *extra_headers;  /* optional additional headers, each "Key: Value\r\n" */
+    bool shallow;         /* if true: PROPFIND uses Depth: 0 instead of Depth: 1 */
 };
 
 static char *webdav_method_names[] = {
@@ -242,14 +250,16 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
     /* PROPFIND-specific headers */
     if (is_propfind)
         hdr_len += snprintf(full_request + hdr_len, buf_size - hdr_len,
-                            "Depth: 1\r\n");
+                            "Depth: %d\r\n", req->shallow ? 0 : 1);
 
     /* Body headers */
     if (req->body_len > 0) {
+        const char *ct = is_propfind ? "application/xml; charset=utf-8"
+                                     : "application/octet-stream";
         hdr_len += snprintf(full_request + hdr_len, buf_size - hdr_len,
-                            "Content-Type: application/xml; charset=utf-8\r\n"
+                            "Content-Type: %s\r\n"
                             "Content-Length: %zu\r\n",
-                            req->body_len);
+                            ct, req->body_len);
     }
 
     /* End of headers */
@@ -730,6 +740,123 @@ cleanup_url:
     kfree(host);
     kfree(path);
     return ret;
+}
+
+/*
+ * Internal helper: run a PROPFIND with Depth: 0 for quota queries.
+ * Shares the same TCP/TLS machinery as kwebdavfs_http_request.
+ */
+static int kwebdavfs_quota_request(struct kwebdavfs_fs_info *fsi, const char *url,
+                                    const char *body, size_t body_len,
+                                    struct webdav_response *response)
+{
+    struct socket     *sock = NULL;
+    struct tls13_ctx  *tls  = NULL;
+    struct sockaddr_in addr;
+    struct http_request req;
+    char *host, *path;
+    int  port, ret;
+    bool use_ssl;
+
+    ret = parse_url(url, &host, &path, &port, &use_ssl);
+    if (ret < 0) return ret;
+
+    ret = sock_create(AF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
+    if (ret < 0) goto cleanup_url;
+
+    sock->sk->sk_rcvtimeo = msecs_to_jiffies(10000); /* 10 s — quota is small */
+    sock->sk->sk_sndtimeo = msecs_to_jiffies(10000);
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    ret = resolve_hostname(host, &addr);
+    if (ret < 0) goto cleanup_sock;
+
+    do {
+        ret = kernel_connect(sock, (struct sockaddr *)&addr, sizeof(addr), 0);
+    } while ((ret == -ERESTARTSYS || ret == -EINTR) && !fatal_signal_pending(current));
+    if (ret < 0) goto cleanup_sock;
+
+    if (use_ssl) {
+        ret = upgrade_to_tls(sock, host, &tls);
+        if (ret < 0) goto cleanup_sock;
+    }
+
+    memset(&req, 0, sizeof(req));
+    req.method   = "PROPFIND";
+    req.url      = (char *)url;
+    req.host     = host;
+    req.path     = path;
+    req.body     = (char *)body;
+    req.body_len = body_len;
+    req.shallow  = true; /* Depth: 0 — only the resource itself */
+    if (fsi->username && fsi->password)
+        req.auth_header = build_auth_header(fsi->username, fsi->password);
+
+    ret = send_http_request(sock, tls, &req);
+    if (ret == 0)
+        ret = receive_http_response(sock, tls, response);
+
+    kfree(req.auth_header);
+    if (tls) tls13_free(tls);
+cleanup_sock:
+    sock_release(sock);
+cleanup_url:
+    kfree(host);
+    kfree(path);
+    return ret;
+}
+
+/**
+ * kwebdavfs_get_quota - query DAV quota properties for statfs.
+ * @available: set to quota-available-bytes (bytes free for this user).
+ * @used:      set to quota-used-bytes.
+ * Returns 0 on success, negative errno on failure.
+ */
+int kwebdavfs_get_quota(struct kwebdavfs_fs_info *fsi, const char *url,
+                        loff_t *available, loff_t *used)
+{
+    struct webdav_response response;
+    const char *quota_body =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        "<D:propfind xmlns:D=\"DAV:\">"
+        "<D:prop>"
+        "<D:quota-available-bytes/>"
+        "<D:quota-used-bytes/>"
+        "</D:prop>"
+        "</D:propfind>";
+    int ret;
+
+    *available = 0;
+    *used      = 0;
+
+    memset(&response, 0, sizeof(response));
+    /* Use kwebdavfs_http_request with PROPFIND; we need Depth:0, so pass
+     * it via a thin wrapper that temporarily patches the request. */
+    ret = kwebdavfs_quota_request(fsi, url, quota_body,
+                                  strlen(quota_body), &response);
+    if (ret < 0)
+        return ret;
+    if (response.status_code != 207 && response.status_code != 200) {
+        kwebdavfs_free_response(&response);
+        return -EIO;
+    }
+
+    if (response.data) {
+        const char *end;
+        const char *p;
+
+        p = find_element(response.data, "quota-available-bytes", &end);
+        if (p && end)
+            *available = simple_strtoll(p, NULL, 10);
+
+        p = find_element(response.data, "quota-used-bytes", &end);
+        if (p && end)
+            *used = simple_strtoll(p, NULL, 10);
+    }
+    kwebdavfs_free_response(&response);
+    return 0;
 }
 
 int kwebdavfs_propfind(struct kwebdavfs_fs_info *fsi, const char *url,

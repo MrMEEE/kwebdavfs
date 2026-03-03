@@ -3,6 +3,7 @@
 #include <linux/parser.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
+#include <linux/statfs.h>
 
 #include "kwebdavfs.h"
 
@@ -314,6 +315,37 @@ char *kwebdavfs_build_url(struct kwebdavfs_fs_info *fsi, const char *path)
     }
     
     return url;
+}
+
+/*
+ * statfs: query DAV quota properties and fill struct kstatfs.
+ * Falls back to "unlimited" if the server doesn't support quota.
+ */
+int kwebdavfs_statfs(struct dentry *dentry, struct kstatfs *buf)
+{
+    struct kwebdavfs_fs_info *fsi = KWEBDAVFS_SB(dentry->d_sb);
+    loff_t available = 0, used = 0;
+    int ret;
+
+    memset(buf, 0, sizeof(*buf));
+    buf->f_type    = dentry->d_sb->s_magic;
+    buf->f_bsize   = PAGE_SIZE;
+    buf->f_namelen = 255;
+
+    ret = kwebdavfs_get_quota(fsi, fsi->base_url, &available, &used);
+    if (ret == 0 && (available > 0 || used > 0)) {
+        loff_t total = available + used;
+        buf->f_blocks = (u64)(total   >> PAGE_SHIFT);
+        buf->f_bfree  = (u64)(available >> PAGE_SHIFT);
+        buf->f_bavail = buf->f_bfree;
+    } else {
+        /* Server doesn't support quota or request failed;
+         * report a large placeholder so GUIs don't block writes */
+        buf->f_blocks = (1ULL << 40) >> PAGE_SHIFT; /* 1 TiB */
+        buf->f_bfree  = buf->f_blocks;
+        buf->f_bavail = buf->f_blocks;
+    }
+    return 0;
 }
 
 /*
