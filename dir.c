@@ -230,8 +230,9 @@ static int kwebdavfs_create(struct mnt_idmap *idmap, struct inode *dir,
         goto out_free_url;
     }
 
-    if (response.status_code != 201 && response.status_code != 200) {
-        printk(KERN_ERR "kwebdavfs: server returned %d for PUT %s\n", 
+    if (response.status_code != 200 && response.status_code != 201 &&
+        response.status_code != 204) {
+        printk(KERN_ERR "kwebdavfs: server returned %d for PUT %s\n",
                response.status_code, file_url);
         ret = -EIO;
         goto out_free_response;
