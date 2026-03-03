@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/string.h>
 #include <linux/time.h>
 #include <linux/inet.h>
@@ -205,11 +206,11 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
                         strcmp(req->method, "PROPPATCH") == 0);
     int ret;
 
-    /* Allocate a buffer large enough for all headers + body */
+    /* Headers only — body is sent separately below */
     buf_size = strlen(req->method) + strlen(req->path) + strlen(req->host)
                + (req->auth_header ? strlen(req->auth_header) : 0)
                + (req->extra_headers ? strlen(req->extra_headers) : 0)
-               + req->body_len + 512;
+               + 512;
 
     full_request = kmalloc(buf_size, GFP_KERNEL);
     if (!full_request)
@@ -253,13 +254,7 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
     /* End of headers */
     hdr_len += snprintf(full_request + hdr_len, buf_size - hdr_len, "\r\n");
 
-    /* Append body */
-    if (req->body && req->body_len > 0) {
-        memcpy(full_request + hdr_len, req->body, req->body_len);
-        hdr_len += req->body_len;
-    }
-
-    /* Send */
+    /* Send headers */
     memset(&msg, 0, sizeof(msg));
     iov.iov_base = full_request;
     iov.iov_len  = hdr_len;
@@ -268,157 +263,127 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
         ret = tls13_send(tls, full_request, hdr_len);
     else
         ret = kernel_sendmsg(sock, &msg, &iov, 1, hdr_len);
-
+    if (ret < 0) {
+        kfree(full_request);
+        return ret;
+    }
     kfree(full_request);
-    return (ret < 0) ? ret : 0;
+
+    /* Send body separately in chunks — avoids giant kmalloc for large files */
+    if (req->body && req->body_len > 0) {
+        const size_t SEND_CHUNK = 131072; /* 128 KB */
+        size_t sent = 0;
+        while (sent < req->body_len) {
+            size_t chunk = min(req->body_len - sent, SEND_CHUNK);
+            if (tls) {
+                ret = tls13_send(tls, req->body + sent, chunk);
+            } else {
+                memset(&msg, 0, sizeof(msg));
+                iov.iov_base = (char *)req->body + sent;
+                iov.iov_len  = chunk;
+                ret = kernel_sendmsg(sock, &msg, &iov, 1, chunk);
+            }
+            if (ret < 0) return ret;
+            sent += ret;
+        }
+    }
+    return 0;
 }
+
+/* Max sizes for response reading */
+#define KWEBDAV_HDR_BUF     16384                   /* 16 KB  — headers      */
+#define KWEBDAV_READ_CHUNK  65536                   /* 64 KB  — body chunks  */
+#define KWEBDAV_MAX_BODY   (256 * 1024 * 1024)      /* 256 MB — hard cap     */
 
 static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
                                   struct webdav_response *response)
 {
-    struct msghdr msg;
-    struct kvec iov;
-    char *buffer;
-    char *headers_end, *content_start;
-    int total_received = 0;
-    int ret;
-    const int BUF_SIZE = 131072; /* 128 KB */
-    long long content_length = -1;
-    bool is_chunked = false;
-
-    buffer = kmalloc(BUF_SIZE, GFP_KERNEL);
-    if (!buffer)
-        return -ENOMEM;
+    struct msghdr  msg;
+    struct kvec    iov;
+    char          *hdr_buf, *headers_end, *content_start;
+    int            hdr_received = 0, ret;
+    long long      content_length = -1;
+    bool           is_chunked = false;
 
     memset(response, 0, sizeof(*response));
 
-    /* Phase 1: accumulate until we have complete headers */
+    /* ---- Phase 1: read until we have complete headers (≤ 16 KB) ---- */
+    hdr_buf = kmalloc(KWEBDAV_HDR_BUF, GFP_KERNEL);
+    if (!hdr_buf)
+        return -ENOMEM;
+
     for (;;) {
+        int space = KWEBDAV_HDR_BUF - 1 - hdr_received;
+        if (space <= 0) {
+            printk(KERN_ERR "kwebdavfs: response headers exceed %d bytes\n",
+                   KWEBDAV_HDR_BUF);
+            kfree(hdr_buf);
+            return -EMSGSIZE;
+        }
         memset(&msg, 0, sizeof(msg));
-        iov.iov_base = buffer + total_received;
-        iov.iov_len  = BUF_SIZE - 1 - total_received;
-        if (iov.iov_len == 0) break;
-
+        iov.iov_base = hdr_buf + hdr_received;
+        iov.iov_len  = space;
         if (tls)
-            ret = tls13_recv(tls, buffer + total_received, iov.iov_len, 0);
+            ret = tls13_recv(tls, hdr_buf + hdr_received, space, 0);
         else
-            ret = kernel_recvmsg(sock, &msg, &iov, 1, iov.iov_len, 0);
-
+            ret = kernel_recvmsg(sock, &msg, &iov, 1, space, 0);
         if (ret < 0) {
             if ((ret == -ERESTARTSYS || ret == -EINTR) && !fatal_signal_pending(current))
-                continue; /* non-fatal signal, retry */
-            printk(KERN_ERR "kwebdavfs: recv phase1 error %d after %d bytes\n",
-                   ret, total_received);
-            kfree(buffer);
+                continue;
+            kfree(hdr_buf);
             return ret;
         }
-        if (ret == 0) break;
-        total_received += ret;
-        buffer[total_received] = '\0';
-        if (strstr(buffer, "\r\n\r\n")) break;
+        if (ret == 0) break; /* EOF before headers complete */
+        hdr_received += ret;
+        hdr_buf[hdr_received] = '\0';
+        if (strstr(hdr_buf, "\r\n\r\n"))
+            break;
     }
 
-    if (total_received == 0) { kfree(buffer); return -ECONNRESET; }
+    if (hdr_received == 0) { kfree(hdr_buf); return -ECONNRESET; }
 
-    headers_end = strstr(buffer, "\r\n\r\n");
+    headers_end = strstr(hdr_buf, "\r\n\r\n");
     if (!headers_end) {
-        printk(KERN_ERR "kwebdavfs: no headers end after %d bytes: %.80s\n",
-               total_received, buffer);
-        kfree(buffer);
+        printk(KERN_ERR "kwebdavfs: no header terminator\n");
+        kfree(hdr_buf);
         return -EINVAL;
     }
-    *headers_end = '\0'; /* null-terminate headers for parsing */
-    headers_end += 4;
-    content_start = headers_end;
+    *headers_end = '\0'; /* null-terminate header block for sscanf/strstr */
 
     /* Parse status code */
-    if (sscanf(buffer, "HTTP/1.%*d %d", &response->status_code) != 1) {
-        printk(KERN_ERR "kwebdavfs: bad status line: %.60s\n", buffer);
-        kfree(buffer);
+    if (sscanf(hdr_buf, "HTTP/1.%*d %d", &response->status_code) != 1) {
+        printk(KERN_ERR "kwebdavfs: bad status: %.60s\n", hdr_buf);
+        kfree(hdr_buf);
         return -EINVAL;
     }
 
-    /* Parse Content-Length */
+    /* Content-Length */
     {
-        char *cl = strstr(buffer, "Content-Length:");
-        if (!cl) cl = strstr(buffer, "content-length:");
+        char *cl = strstr(hdr_buf, "Content-Length:");
+        if (!cl) cl = strstr(hdr_buf, "content-length:");
         if (cl) {
-            sscanf(cl, "Content-Length: %lld", &content_length);
-            if (content_length < 0)
-                sscanf(cl, "content-length: %lld", &content_length);
+            sscanf(cl + 15, " %lld", &content_length);
             response->content_length = content_length;
         }
     }
 
-    /* Check for chunked transfer encoding */
-    if (strstr(buffer, "Transfer-Encoding: chunked") ||
-        strstr(buffer, "transfer-encoding: chunked"))
+    /* Chunked transfer encoding */
+    if (strstr(hdr_buf, "Transfer-Encoding: chunked") ||
+        strstr(hdr_buf, "transfer-encoding: chunked"))
         is_chunked = true;
 
-    /* Restore terminator (we nulled it for parsing) */
-    *headers_end = 'H'; /* restore — doesn't matter, we use content_start */
-    headers_end -= 4;
-    *headers_end = '\r';
-
-    /* Phase 2: read body until complete */
-    if (content_length > 0) {
-        long long body_already = (buffer + total_received) - content_start;
-        while (body_already < content_length &&
-               total_received < BUF_SIZE - 1) {
-            iov.iov_base = buffer + total_received;
-            iov.iov_len  = BUF_SIZE - 1 - total_received;
-            if (iov.iov_len == 0) break;
-            memset(&msg, 0, sizeof(msg));
-
-            if (tls)
-                ret = tls13_recv(tls, buffer + total_received, iov.iov_len, 0);
-            else
-                ret = kernel_recvmsg(sock, &msg, &iov, 1, iov.iov_len, 0);
-
-            if (ret == -ERESTARTSYS || ret == -EINTR) continue; /* retry */
-            if (ret <= 0) break; /* EOF, timeout, or error — use what we have */
-            total_received += ret;
-            buffer[total_received] = '\0';
-            body_already += ret;
-        }
-    } else if (is_chunked || content_length < 0) {
-        /* Read until connection close */
-        for (;;) {
-            if (total_received >= BUF_SIZE - 1) break;
-            iov.iov_base = buffer + total_received;
-            iov.iov_len  = BUF_SIZE - 1 - total_received;
-            memset(&msg, 0, sizeof(msg));
-
-            if (tls)
-                ret = tls13_recv(tls, buffer + total_received, iov.iov_len, 0);
-            else
-                ret = kernel_recvmsg(sock, &msg, &iov, 1, iov.iov_len, 0);
-
-            if (ret == -ERESTARTSYS || ret == -EINTR) continue; /* retry */
-            if (ret <= 0) break; /* EOF, timeout, or error — use what we have */
-            total_received += ret;
-            buffer[total_received] = '\0';
-        }
-    }
-
-    /* Re-find headers end after all reads */
-    headers_end = strstr(buffer, "\r\n\r\n");
-    if (headers_end) headers_end += 4;
-    else headers_end = buffer; /* fallback */
-    content_start = headers_end;
-
-    /* Extract ETag */
+    /* ETag */
     {
-        char *etag_line = strstr(buffer, "ETag:");
+        char *etag_line = strstr(hdr_buf, "ETag:");
         if (etag_line) {
-            char *etag_start = strchr(etag_line, '"');
-            if (etag_start && etag_start < content_start) {
-                char *etag_end = strchr(etag_start + 1, '"');
-                if (etag_end && etag_end < content_start) {
-                    size_t elen = etag_end - etag_start - 1;
+            char *es = strchr(etag_line, '"');
+            if (es) {
+                char *ee = strchr(es + 1, '"');
+                if (ee) {
+                    size_t elen = ee - es - 1;
                     response->etag = kmalloc(elen + 1, GFP_KERNEL);
                     if (response->etag) {
-                        memcpy(response->etag, etag_start + 1, elen);
+                        memcpy(response->etag, es + 1, elen);
                         response->etag[elen] = '\0';
                     }
                 }
@@ -426,22 +391,91 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
         }
     }
 
-    /* Copy body */
-    if (content_start && content_start < buffer + total_received) {
-        response->data_len = buffer + total_received - content_start;
-        response->data = kmalloc(response->data_len + 1, GFP_KERNEL);
-        if (response->data) {
-            memcpy(response->data, content_start, response->data_len);
-            response->data[response->data_len] = '\0';
+    /* Body bytes that overflowed into the header buffer */
+    content_start = headers_end + 4;
+    {
+        int overflow = hdr_received - (int)(content_start - hdr_buf);
+        if (overflow < 0) overflow = 0;
+
+        /* ---- Phase 2: read body into a kvmalloc buffer ---- */
+        if (content_length > 0) {
+            /* Known length: allocate exactly */
+            size_t cl = (size_t)content_length;
+            char  *body;
+            size_t got = 0;
+
+            if (content_length > KWEBDAV_MAX_BODY) {
+                printk(KERN_ERR "kwebdavfs: body too large (%lld)\n", content_length);
+                kfree(hdr_buf);
+                return -EFBIG;
+            }
+            body = kvmalloc(cl + 1, GFP_KERNEL);
+            if (!body) { kfree(hdr_buf); return -ENOMEM; }
+
+            if (overflow > 0) {
+                size_t copy = min_t(size_t, (size_t)overflow, cl);
+                memcpy(body, content_start, copy);
+                got = copy;
+            }
+            while (got < cl) {
+                int want = (int)min_t(size_t, cl - got, KWEBDAV_READ_CHUNK);
+                memset(&msg, 0, sizeof(msg));
+                iov.iov_base = body + got;
+                iov.iov_len  = want;
+                if (tls)
+                    ret = tls13_recv(tls, body + got, want, 0);
+                else
+                    ret = kernel_recvmsg(sock, &msg, &iov, 1, want, 0);
+                if (ret == -ERESTARTSYS || ret == -EINTR) continue;
+                if (ret <= 0) break;
+                got += ret;
+            }
+            body[got] = '\0';
+            response->data     = body;
+            response->data_len = got;
+        } else if (is_chunked || content_length < 0) {
+            /* Unknown / chunked: grow buffer dynamically */
+            size_t alloc = (size_t)overflow + KWEBDAV_READ_CHUNK;
+            char  *body  = kvmalloc(alloc + 1, GFP_KERNEL);
+            size_t got   = 0;
+
+            if (!body) { kfree(hdr_buf); return -ENOMEM; }
+
+            if (overflow > 0) {
+                memcpy(body, content_start, overflow);
+                got = overflow;
+            }
+            for (;;) {
+                char *tmp;
+                if (got >= KWEBDAV_MAX_BODY) break;
+                if (got + KWEBDAV_READ_CHUNK > alloc) {
+                    tmp = kvrealloc(body, alloc + KWEBDAV_READ_CHUNK + 1,
+                                    GFP_KERNEL);
+                    if (!tmp) break; /* keep what we have */
+                    body   = tmp;
+                    alloc += KWEBDAV_READ_CHUNK;
+                }
+                memset(&msg, 0, sizeof(msg));
+                iov.iov_base = body + got;
+                iov.iov_len  = KWEBDAV_READ_CHUNK;
+                if (tls)
+                    ret = tls13_recv(tls, body + got, KWEBDAV_READ_CHUNK, 0);
+                else
+                    ret = kernel_recvmsg(sock, &msg, &iov, 1, KWEBDAV_READ_CHUNK, 0);
+                if (ret == -ERESTARTSYS || ret == -EINTR) continue;
+                if (ret <= 0) break;
+                got += ret;
+            }
+            body[got] = '\0';
+            response->data     = body;
+            response->data_len = got;
         }
-        printk(KERN_INFO "kwebdavfs: response status=%d body=%zu bytes\n",
-               response->status_code, response->data_len);
-    } else {
-        printk(KERN_INFO "kwebdavfs: response status=%d no body\n",
-               response->status_code);
     }
 
-    kfree(buffer);
+    printk(KERN_INFO "kwebdavfs: response status=%d body=%zu bytes\n",
+           response->status_code, response->data_len);
+
+    kfree(hdr_buf);
     return 0;
 }
 
@@ -847,7 +881,7 @@ void kwebdavfs_free_dirents(struct list_head *entries)
 void kwebdavfs_free_response(struct webdav_response *response)
 {
     if (response) {
-        kfree(response->data);
+        kvfree(response->data); /* may be vmalloc-backed for large bodies */
         kfree(response->etag);
         memset(response, 0, sizeof(*response));
     }

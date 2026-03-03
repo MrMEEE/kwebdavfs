@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <linux/stat.h>
 #include <linux/time.h>
@@ -171,7 +172,7 @@ int kwebdavfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
                 ret = kwebdavfs_http_request(fsi, WEBDAV_GET, ei->url,
                                              NULL, 0, &get_resp);
                 if (!ret) {
-                    buf = kzalloc(newsize, GFP_KERNEL);
+                    buf = kvzalloc(newsize, GFP_KERNEL);
                     if (!buf) {
                         ret = -ENOMEM;
                     } else {
@@ -185,7 +186,7 @@ int kwebdavfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
                             resp.status_code != 201 && resp.status_code != 204)
                             ret = -EIO;
                         kwebdavfs_free_response(&resp);
-                        kfree(buf);
+                        kvfree(buf);
                     }
                 }
                 kwebdavfs_free_response(&get_resp);

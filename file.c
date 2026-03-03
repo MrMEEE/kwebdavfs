@@ -2,6 +2,7 @@
 #include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/buffer_head.h>
+#include <linux/vmalloc.h>
 #include <linux/writeback.h>
 
 #include "kwebdavfs.h"
@@ -124,8 +125,9 @@ static ssize_t kwebdavfs_file_write_iter(struct kiocb *iocb, struct iov_iter *it
     /* Final file size after this write */
     new_size = (size_t)max_t(loff_t, i_size_read(inode), (loff_t)(offset + count));
 
-    /* Allocate merged buffer, zero-initialised (handles gaps and extensions) */
-    buffer = kzalloc(new_size, GFP_KERNEL);
+    /* Allocate merged buffer, zero-initialised (handles gaps and extensions).
+     * Use kvzalloc so large files don't fail due to contiguous-memory pressure. */
+    buffer = kvzalloc(new_size, GFP_KERNEL);
     if (!buffer) {
         mutex_unlock(&ei->inode_mutex);
         return -ENOMEM;
@@ -141,7 +143,7 @@ static ssize_t kwebdavfs_file_write_iter(struct kiocb *iocb, struct iov_iter *it
                    min_t(size_t, get_resp.data_len, new_size));
         kwebdavfs_free_response(&get_resp);
         if (ret < 0) {
-            kfree(buffer);
+            kvfree(buffer);
             mutex_unlock(&ei->inode_mutex);
             return ret;
         }
@@ -149,7 +151,7 @@ static ssize_t kwebdavfs_file_write_iter(struct kiocb *iocb, struct iov_iter *it
 
     /* Copy new data into buffer at the write offset */
     if (copy_from_iter(buffer + offset, count, iter) != count) {
-        kfree(buffer);
+        kvfree(buffer);
         mutex_unlock(&ei->inode_mutex);
         return -EFAULT;
     }
@@ -157,7 +159,7 @@ static ssize_t kwebdavfs_file_write_iter(struct kiocb *iocb, struct iov_iter *it
     /* PUT the complete merged file */
     memset(&response, 0, sizeof(response));
     ret = kwebdavfs_http_request(fsi, WEBDAV_PUT, ei->url, buffer, new_size, &response);
-    kfree(buffer);
+    kvfree(buffer);
 
     if (ret < 0) {
         printk(KERN_ERR "kwebdavfs: failed to write %s: %d\n", ei->url, ret);
