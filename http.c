@@ -409,17 +409,26 @@ static int receive_http_response(struct socket *sock, struct tls13_ctx *tls,
 
     headers_end = strstr(hdr_buf, "\r\n\r\n");
     if (!headers_end) {
-        printk(KERN_ERR "kwebdavfs: no header terminator\n");
+        printk(KERN_ERR "kwebdavfs: no header terminator (got %d bytes)\n", hdr_received);
         kfree(hdr_buf);
-        return -EINVAL;
+        return -EIO;
     }
     *headers_end = '\0'; /* null-terminate header block for sscanf/strstr */
 
     /* Parse status code */
     if (sscanf(hdr_buf, "HTTP/1.%*d %d", &response->status_code) != 1) {
-        printk(KERN_ERR "kwebdavfs: bad status: %.60s\n", hdr_buf);
+        printk(KERN_ERR "kwebdavfs: bad status line: %.60s\n", hdr_buf);
         kfree(hdr_buf);
-        return -EINVAL;
+        return -EIO;
+    }
+
+    /* RFC 7230: 1xx, 204, 304 must not include a message body */
+    if (response->status_code < 200 || response->status_code == 204 ||
+        response->status_code == 304) {
+        printk(KERN_INFO "kwebdavfs: response status=%d body=0 bytes\n",
+               response->status_code);
+        kfree(hdr_buf);
+        return 0;
     }
 
     /* Content-Length */

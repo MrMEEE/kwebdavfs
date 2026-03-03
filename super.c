@@ -332,7 +332,7 @@ int kwebdavfs_statfs(struct dentry *dentry, struct kstatfs *buf)
     buf->f_bsize   = PAGE_SIZE;
     buf->f_namelen = 255;
 
-    ret = kwebdavfs_get_quota(fsi, fsi->base_url, &available, &used);
+    ret = kwebdavfs_get_quota(fsi, fsi->server_url, &available, &used);
     if (ret == 0 && (available > 0 || used > 0)) {
         loff_t total = available + used;
         buf->f_blocks = (u64)(total   >> PAGE_SHIFT);
