@@ -276,15 +276,18 @@ static int send_http_request(struct socket *sock, struct tls13_ctx *tls,
         while (sent < req->body_len) {
             size_t chunk = min(req->body_len - sent, SEND_CHUNK);
             if (tls) {
+                /* tls13_send is all-or-nothing: returns 0 on success, <0 on error */
                 ret = tls13_send(tls, req->body + sent, chunk);
+                if (ret < 0) return ret;
+                sent += chunk;
             } else {
                 memset(&msg, 0, sizeof(msg));
                 iov.iov_base = (char *)req->body + sent;
                 iov.iov_len  = chunk;
                 ret = kernel_sendmsg(sock, &msg, &iov, 1, chunk);
+                if (ret < 0) return ret;
+                sent += ret;
             }
-            if (ret < 0) return ret;
-            sent += ret;
         }
     }
     return 0;
