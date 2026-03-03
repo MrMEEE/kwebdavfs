@@ -730,9 +730,12 @@ int kwebdavfs_http_move(struct kwebdavfs_fs_info *fsi, const char *src_url,
     ret = receive_http_response(sock, tls, &response);
     if (ret < 0) goto cleanup_auth;
 
+    printk(KERN_DEBUG "kwebdavfs: MOVE %s -> %d (%s)\n",
+           src_url, response.status_code, use_ssl ? "TLS1.3" : "plain");
+
     /* 201 Created or 204 No Content = success */
     if (response.status_code != 201 && response.status_code != 204) {
-        printk(KERN_ERR "kwebdavfs: MOVE %s -> %s returned %d\n",
+        printk(KERN_ERR "kwebdavfs: MOVE %s -> %s failed: %d\n",
                src_url, dst_url, response.status_code);
         ret = (response.status_code == 412) ? -EEXIST : -EIO;
     }

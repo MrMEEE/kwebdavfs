@@ -194,13 +194,21 @@ static int kwebdavfs_create(struct mnt_idmap *idmap, struct inode *dir,
     if (!dir_ei->url)
         return -ENOENT;
 
-    /* Build path for new file, percent-encoding special chars in name */
+    /* Build path for new file, percent-encoding special chars in name.
+     * dir_ei->url may end with '/' — strip it to avoid double-slash. */
     {
         char *enc = kwebdavfs_url_encode_segment(name);
+        const char *dir_path;
+        size_t dir_path_len;
         if (!enc)
             return -ENOMEM;
-        file_path = kasprintf(GFP_KERNEL, "%s/%s",
-                             dir_ei->url + strlen(fsi->server_url), enc);
+        dir_path = dir_ei->url + strlen(fsi->server_url);
+        dir_path_len = strlen(dir_path);
+        if (dir_path_len > 0 && dir_path[dir_path_len - 1] == '/')
+            file_path = kasprintf(GFP_KERNEL, "%.*s%s",
+                                  (int)(dir_path_len - 1), dir_path, enc);
+        else
+            file_path = kasprintf(GFP_KERNEL, "%s/%s", dir_path, enc);
         kfree(enc);
     }
     if (!file_path)
@@ -413,17 +421,29 @@ static int kwebdavfs_rename(struct mnt_idmap *idmap,
     if (!src_ei->url || !new_dir_ei->url)
         return -ENOENT;
 
-    /* Build destination URL, percent-encoding special chars in new_name */
+    /* Build destination URL, percent-encoding special chars in new_name.
+     * new_dir_ei->url may end with '/' — strip it to avoid double-slash. */
     {
         char *enc = kwebdavfs_url_encode_segment(new_name);
+        const char *dir_path;
+        size_t dir_path_len;
         if (!enc)
             return -ENOMEM;
-        if (is_dir)
-            dst_path = kasprintf(GFP_KERNEL, "%s/%s/",
-                                 new_dir_ei->url + strlen(fsi->server_url), enc);
-        else
-            dst_path = kasprintf(GFP_KERNEL, "%s/%s",
-                                 new_dir_ei->url + strlen(fsi->server_url), enc);
+        dir_path = new_dir_ei->url + strlen(fsi->server_url);
+        dir_path_len = strlen(dir_path);
+        if (dir_path_len > 0 && dir_path[dir_path_len - 1] == '/') {
+            if (is_dir)
+                dst_path = kasprintf(GFP_KERNEL, "%.*s/%s/",
+                                     (int)(dir_path_len - 1), dir_path, enc);
+            else
+                dst_path = kasprintf(GFP_KERNEL, "%.*s/%s",
+                                     (int)(dir_path_len - 1), dir_path, enc);
+        } else {
+            if (is_dir)
+                dst_path = kasprintf(GFP_KERNEL, "%s/%s/", dir_path, enc);
+            else
+                dst_path = kasprintf(GFP_KERNEL, "%s/%s", dir_path, enc);
+        }
         kfree(enc);
     }
     if (!dst_path)

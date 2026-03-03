@@ -215,6 +215,7 @@ const struct file_operations kwebdavfs_file_operations = {
     .write_iter     = kwebdavfs_file_write_iter,
     .open           = kwebdavfs_file_open,
     .release        = kwebdavfs_file_release,
+    .fsync          = noop_fsync,  /* writes are synchronous; satisfies GIO sync_on_close */
     .llseek         = kwebdavfs_file_llseek,
 };
 
