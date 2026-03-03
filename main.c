@@ -33,6 +33,10 @@ static struct inode *kwebdavfs_alloc_inode(struct super_block *sb)
     memset(&ei->remote_mtime, 0, sizeof(ei->remote_mtime));
     INIT_LIST_HEAD(&ei->dir_cache);
     ei->dir_cache_until = 0;
+    ei->write_buf       = NULL;
+    ei->write_buf_alloc = 0;
+    ei->write_buf_len   = 0;
+    ei->write_dirty     = false;
     mutex_init(&ei->inode_mutex);
 
     return &ei->vfs_inode;
@@ -59,6 +63,8 @@ static void kwebdavfs_destroy_inode(struct inode *inode)
 
     kfree(ei->url);
     kfree(ei->etag);
+    if (ei->write_buf)
+        kvfree(ei->write_buf);
     /* dir_cache already freed and reinitialized in evict_inode */
     kmem_cache_free(kwebdavfs_inode_cache, ei);
 }

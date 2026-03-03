@@ -45,6 +45,11 @@ struct kwebdavfs_inode_info {
     struct list_head dir_cache;     /* list of webdav_dirent */
     unsigned long dir_cache_until;  /* jiffies: dir cache valid until this */
     struct mutex inode_mutex;       /* Per-inode mutex */
+    /* Write buffer: all writes are accumulated here; flushed on fsync/release */
+    char   *write_buf;              /* kvmalloc'd buffer, NULL if no pending write */
+    size_t  write_buf_alloc;        /* allocated size of write_buf */
+    size_t  write_buf_len;          /* logical content length */
+    bool    write_dirty;            /* true if write_buf has unflushed data */
 };
 
 /* Directory cache TTL: 5 minutes (safety net for external changes).
